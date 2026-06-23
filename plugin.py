@@ -1,5 +1,5 @@
 """
-<plugin key="domoticz-ac-pilot" name="Domoticz AC Pilot" author="patrick" version="1.0.1">
+<plugin key="domoticz-ac-pilot" name="Domoticz AC Pilot" author="patrick" version="1.0.2">
     <description>
         <h2>Domoticz AC Pilot</h2>
         <p>Creates a high-level <b>master control</b> for one or more AC splits that
@@ -89,9 +89,15 @@ HEARTBEAT_INTERVAL = 30  # seconds; Domoticz caps this around 30s
 # Each FAN_STEP_DEG of directional error (deg C in the "wrong" direction) climbs
 # one step up the fan ladder. Adapts to however many fan levels are configured.
 FAN_STEP_DEG = 0.5
+# Comfort deadband (deg C): residual error at/under this counts as "at target"
+# (sensor noise, not real demand) and idles the fan to its slowest step.
+FAN_DEADBAND = 0.25
 # Outdoor load (deg C) in the working direction above which the fan is bumped
 # one extra band (hot outside while cooling / cold outside while heating).
 EXT_BOOST_DELTA = 8.0
+# The outdoor boost only helps us *reach* target: it is suppressed once the room
+# is within this error (deg C), so it never lifts the fan near steady state.
+BOOST_MIN_ERR = 1.0
 
 # --- Ambient sensor fusion ----------------------------------------------------
 AVG_DEFAULT = "median"      # how to combine several ambient sensors per split
@@ -591,12 +597,15 @@ class BasePlugin:
     def _fan_for(self, s, error, boost):
         """Steady-state ladder index, lifted by an active warm-up pre-empt."""
         top = len(self.fan_levels) - 1
-        if error <= 0:
-            # At or past target: no demand. Idle the fan to its slowest step,
-            # regardless of the outdoor boost (boost only helps us *reach* target).
+        if error <= FAN_DEADBAND:
+            # At target (within sensor-noise deadband): no real demand. Idle the
+            # fan to its slowest step, regardless of the outdoor boost (boost only
+            # helps us *reach* target, not hold it).
             return self.fan_levels[0]
         idx = int(error / FAN_STEP_DEG)
-        if boost:
+        # Boost only while still working toward target; near steady state it must
+        # not lift the fan a notch over a fraction of a degree of residual error.
+        if boost and error > BOOST_MIN_ERR:
             idx += 1
         if s["warmup_active"] and s["warmup_start_err"] > 0:
             # Jump high at the start of the episode, easing down as the room
