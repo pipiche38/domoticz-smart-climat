@@ -2,12 +2,6 @@
 
 *Projet : **domoticz-ac-pilot** · [🇬🇧 English](README.md) | 🇫🇷 Français*
 
-> Clé du plugin : **`domoticz-ac-pilot`** (nom affiché « Domoticz AC Pilot »). Si vous
-> migrez depuis une version qui utilisait une autre clé de plugin, Domoticz ne reconnaîtra
-> plus votre matériel existant — **supprimez puis ré-ajoutez** chaque instance. Le nouveau
-> matériel reçoit un nouvel HardwareID, donc les variables utilisateur apprises repartent
-> sous la forme `DomoticzACPilot_<HardwareID>`.
-
 Un plugin Python [DomoticzEx](https://wiki.domoticz.com/Developing_a_Python_plugin) qui
 ajoute un **contrôle maître** de haut niveau pour un ou plusieurs splits de climatisation
 déjà pilotables dans Domoticz via des widgets existants.

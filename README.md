@@ -2,11 +2,6 @@
 
 *Project: **domoticz-ac-pilot** · 🇬🇧 English | [🇫🇷 Français](README.fr.md)*
 
-> Plugin key: **`domoticz-ac-pilot`** (display name "Domoticz AC Pilot"). If you are
-> upgrading from an older build that used a different plugin key, Domoticz will no longer
-> match your existing hardware — **delete and re-add** each instance. New hardware gets a
-> new HardwareID, so the learned user variables restart as `DomoticzACPilot_<HardwareID>`.
-
 A [DomoticzEx](https://wiki.domoticz.com/Developing_a_Python_plugin) Python plugin that
 adds a single high-level **master control** for one or more AC splits that are
 **already** controllable in Domoticz through existing widgets.
