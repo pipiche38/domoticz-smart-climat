@@ -1,5 +1,5 @@
 """
-<plugin key="domoticz-ac-pilot" name="Domoticz AC Pilot" author="patrick" version="1.0.0">
+<plugin key="domoticz-ac-pilot" name="Domoticz AC Pilot" author="patrick" version="1.0.1">
     <description>
         <h2>Domoticz AC Pilot</h2>
         <p>Creates a high-level <b>master control</b> for one or more AC splits that
@@ -181,8 +181,9 @@ def _clear_warn(idx):
 
 
 def _device(idx):
-    """Return the first result dict for device <idx>, or None."""
-    if not idx:
+    """Return the first result dict for device <idx>, or None.
+    A blank or '0' idx means 'not configured' and is ignored silently."""
+    if not idx or str(idx).strip() in ("", "0"):
         return None
     data = _json_get({"type": "command", "param": "getdevices", "rid": idx})
     if not data:
@@ -272,6 +273,12 @@ def _parse_csv(text):
     return [item.strip() for item in (text or "").split(",") if item.strip()]
 
 
+def _idx_or_none(tok):
+    """A configured idx, or None for a blank/'0' placeholder."""
+    tok = (tok or "").strip()
+    return tok if tok and tok != "0" else None
+
+
 class BasePlugin:
     def __init__(self):
         # split = {onoff, mode, fan, settemp, ambient[list], motion[list],
@@ -325,10 +332,10 @@ class BasePlugin:
         now = time.time()
         for i in range(n):
             self.splits.append({
-                "onoff": onoff[i] if i < len(onoff) else None,
+                "onoff": _idx_or_none(onoff[i]) if i < len(onoff) else None,
                 "mode": mode[i],
                 "fan": fan[i],
-                "settemp": settemp[i] if i < len(settemp) else None,
+                "settemp": _idx_or_none(settemp[i]) if i < len(settemp) else None,
                 "ambient": amb_groups[i],   # list of sensor idx
                 "motion": mot_groups[i],     # list of motion idx (OR'd)
                 "last_fan": None,
@@ -368,7 +375,7 @@ class BasePlugin:
             Domoticz.Error("No valid fan speed levels configured; fan regulation disabled.")
 
         ext = _parse_csv(Parameters["Username"])
-        self.ext_idx = ext[0] if ext else None
+        self.ext_idx = _idx_or_none(ext[0]) if ext else None
 
         self.var_name = LEARN_VAR_PREFIX + str(Parameters.get("HardwareID", "0"))
         Domoticz.Debug("cool=%d heat=%d fan_levels=%s ext_idx=%s learn=%s var=%s"
@@ -512,14 +519,11 @@ class BasePlugin:
     def _idx_groups(tokens, n):
         """One idx list per split. n==1: every token belongs to the split.
         n>1: each token is a split, '+' grouping multiple sensors within it."""
+        def clean(tok):
+            return [x for x in (p.strip() for p in tok.split("+")) if x and x != "0"]
         if n <= 1:
-            flat = [x.strip() for tok in tokens for x in tok.split("+") if x.strip()]
-            return [flat]
-        groups = []
-        for i in range(n):
-            tok = tokens[i] if i < len(tokens) else ""
-            groups.append([x.strip() for x in tok.split("+") if x.strip()])
-        return groups
+            return [[x for tok in tokens for x in clean(tok)]]
+        return [clean(tokens[i]) if i < len(tokens) else [] for i in range(n)]
 
     def _room_temp(self, s):
         """Fuse a split's ambient sensors. Returns (temp_or_None, count_used)."""
