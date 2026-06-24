@@ -138,6 +138,38 @@ réglage (`WARMUP_*`, `LEARN_ALPHA`, `SLOWNESS_MIN`, `DEFAULT_SLOWNESS`) sont en
 `plugin.py`. Vous pouvez inspecter ou réinitialiser les données apprises à tout moment dans
 **Réglages → Plus d'options → Variables utilisateur**.
 
+### Journalisation de la progression
+
+Tant que le maître est en **Cold-Auto / Heat-Auto** et qu'une pièce **n'a pas atteint la
+cible**, le plugin écrit une ligne concise dans le **journal Domoticz standard** (sans avoir
+besoin du mode Debug), au plus une fois par minute et par split, pour suivre la convergence
+d'un coup d'œil :
+
+```
+Salon Clim — Vitesse : pièce 23,8°C -> cible 22,0°C, écart 1,80°C, ventilo=40 (occupé) +boost-ext, réduit 0,30°C/min, ETA ~6 min | median sur 2 : 424=23.8 1173=23.9
+```
+
+Chaque ligne indique :
+
+- **Nom du widget** — résolu depuis l'**idx Ventilation** au démarrage (repli sur `fan <idx>`
+  si l'appareil est illisible), pour nommer les pièces au lieu de les numéroter.
+- **pièce → cible / écart** — l'ambiante fusionnée, la cible active et l'erreur restante.
+- **ventilo / occupé|ECO / +boost-ext** — le niveau de ventilation choisi et le contexte.
+- **réduit …°C/min, ETA** — la vitesse de convergence mesurée depuis la ligne précédente et
+  une estimation du temps jusqu'à la cible (ou `dérive` / `stable` si l'écart ne se réduit pas).
+- **détail de la fusion** — comment les capteurs ambiants ont été combinés
+  (`median`/`mean`/`weighted`, la valeur de chaque capteur, et sa part `%` en mode `weighted`).
+
+Quand la pièce atteint la cible, une dernière ligne est journalisée puis le split se
+**tait** jusqu'à ce que l'écart se rouvre, pour ne pas saturer le journal en régime établi :
+
+```
+Salon Clim — Vitesse : à la cible 22,0°C (pièce 22,1°C, écart 0,10°C) | median sur 2 : 424=22.1 1173=22.2
+```
+
+Le détail complet à chaque battement (toutes les 30 s) reste disponible au niveau **Debug**.
+La cadence est la constante `STATUS_LOG_INTERVAL` (60 s) en tête de `plugin.py`.
+
 ## Installation
 
 1. Copiez ce dossier dans le répertoire des plugins de Domoticz de sorte que le fichier soit

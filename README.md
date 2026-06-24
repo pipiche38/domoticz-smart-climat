@@ -132,6 +132,37 @@ user variable is then read or written). Tuning constants (`WARMUP_*`, `LEARN_ALP
 `SLOWNESS_MIN`, `DEFAULT_SLOWNESS`) are at the top of `plugin.py`. You can inspect or
 reset the learned data anytime under **Setup → More Options → User Variables**.
 
+### Progress logging
+
+While the master is in **Cold-Auto / Heat-Auto** and a room is **still working toward
+target**, the plugin writes a concise line to the **standard Domoticz log** (no Debug
+needed) at most once a minute per split, so you can watch convergence at a glance:
+
+```
+Salon Clim — Vitesse: room 23.8°C -> target 22.0°C, gap 1.80°C, fan=40 (occupied) +ext-boost, closing 0.30°C/min, ETA ~6 min | median of 2: 424=23.8 1173=23.9
+```
+
+Each line shows:
+
+- **Widget name** — resolved from the **Fan idx** at startup (falls back to `fan <idx>`
+  if the device can't be read), so rooms are named rather than numbered.
+- **room → target / gap** — the fused ambient, the active target, and the remaining error.
+- **fan / occupied|ECO / +ext-boost** — the fan level chosen and the regulation context.
+- **closing …°C/min, ETA** — the convergence rate measured since the previous line and a
+  rough time-to-target (or `drifting` / `steady` when the gap is not shrinking).
+- **fusion breakdown** — how the ambient sensors were combined (`median`/`mean`/`weighted`,
+  each sensor's reading, and its share `%` in `weighted` mode).
+
+When the room reaches target it logs one closing line and then goes **quiet** until the
+gap reopens, so steady state doesn't flood the log:
+
+```
+Salon Clim — Vitesse: at target 22.0°C (room 22.1°C, gap 0.10°C) | median of 2: 424=22.1 1173=22.2
+```
+
+The full per-heartbeat detail (every 30 s) remains available at **Debug** level. The cadence
+is the `STATUS_LOG_INTERVAL` constant (60 s) at the top of `plugin.py`.
+
 ## Installation
 
 1. Copy this folder to your Domoticz plugins directory so that the file lands at

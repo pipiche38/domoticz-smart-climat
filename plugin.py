@@ -86,6 +86,10 @@ DEFAULT_TARGET_TEMP = 22.0
 
 # --- Thermostatic fan regulation ---------------------------------------------
 HEARTBEAT_INTERVAL = 30  # seconds; Domoticz caps this around 30s
+# While a room is still working toward target, emit a standard (non-debug) log
+# line at most this often per split, so the regular log shows the fused ambient,
+# how the sensors were combined, and how fast we are converging.
+STATUS_LOG_INTERVAL = 60  # seconds
 # Each FAN_STEP_DEG of directional error (deg C in the "wrong" direction) climbs
 # one step up the fan ladder. Adapts to however many fan levels are configured.
 FAN_STEP_DEG = 0.5
@@ -344,9 +348,13 @@ class BasePlugin:
                 "settemp": _idx_or_none(settemp[i]) if i < len(settemp) else None,
                 "ambient": amb_groups[i],   # list of sensor idx
                 "motion": mot_groups[i],     # list of motion idx (OR'd)
+                "name": None,         # fan widget name, resolved at startup
                 "last_fan": None,
                 "last_setpoint": None,
                 "last_motion": now,   # assume occupied at startup
+                # periodic progress logging (transient):
+                "status_ts": 0.0,     # last time a progress line was logged
+                "status_err": None,   # error at that line, for rate/ETA
                 # warm-up learning (rate persisted; the rest is transient):
                 "rate": None,         # learned approach rate, deg C/min
                 "n": 0,               # number of samples behind the rate
@@ -355,7 +363,9 @@ class BasePlugin:
                 "warmup_start_ts": 0.0,
                 "dirty": False,       # learning changed, needs persisting
             })
-        Domoticz.Log("Configured %d split(s)." % len(self.splits))
+        self._resolve_names()
+        Domoticz.Log("Configured %d split(s): %s"
+                     % (len(self.splits), ", ".join(self._label(s) for s in self.splits)))
 
         # Mode5 = JSON:
         #   {"mode":{"cold":30,"heat":40,...},
@@ -490,7 +500,7 @@ class BasePlugin:
                 if _set_setpoint(s["settemp"], target):
                     s["last_setpoint"] = target
 
-            amb, used = self._room_temp(s)
+            amb, readings, weights = self._room_temp(s)
             if amb is None:
                 continue
             if self.master_level == LVL_COLD:
@@ -506,10 +516,12 @@ class BasePlugin:
             Domoticz.Debug(
                 "Fan idx %s: amb=%.1f(%d/%d %s) target=%.1f(%s) error=%.2f ext=%s "
                 "boost=%s warmup=%s rate=%s -> %d"
-                % (s["fan"], amb, used, len(s["ambient"]), self.avg_mode, target,
+                % (s["fan"], amb, len(readings), len(s["ambient"]), self.avg_mode, target,
                    "occ" if occupied else "ECO", error, ext, boost,
                    s["warmup_active"], s["rate"], level)
             )
+            self._log_progress(s, amb, target, error, level, occupied,
+                               boost, readings, weights, now)
             if s["last_fan"] != level and _set_level(s["fan"], level):
                 s["last_fan"] = level
 
@@ -532,19 +544,23 @@ class BasePlugin:
         return [clean(tokens[i]) if i < len(tokens) else [] for i in range(n)]
 
     def _room_temp(self, s):
-        """Fuse a split's ambient sensors. Returns (temp_or_None, count_used)."""
+        """Fuse a split's ambient sensors.
+        Returns (temp_or_None, readings, weights):
+          readings  list of (idx, temp) actually used in the fusion
+          weights   {idx: share%} for weighted mode, else None."""
         readings = [(idx, _read_temp(idx)) for idx in s["ambient"]]
         readings = [(idx, t) for idx, t in readings if t is not None]
         temps = [t for _, t in readings]
         if not temps:
-            return None, 0
+            return None, [], None
         if len(temps) == 1:
-            return temps[0], 1
+            return temps[0], readings, None
         if self.avg_mode == "mean":
-            return sum(temps) / len(temps), len(temps)
+            return sum(temps) / len(temps), readings, None
         if self.avg_mode == "weighted":
-            return self._weighted_temp(readings, temps), len(temps)
-        return self._median(temps), len(temps)   # default: robust median
+            temp, weights = self._weighted_temp(readings, temps)
+            return temp, readings, weights
+        return self._median(temps), readings, None   # default: robust median
 
     @staticmethod
     def _median(vals):
@@ -570,12 +586,80 @@ class BasePlugin:
             den += w
         result = num / den if den else consensus
         self.sensors_dirty = True
-        # Readable trace: each sensor's temp and its share (%) of the average.
-        parts = " ".join("%s=%.1f(%.0f%%)" % (idx, t, 100.0 * weights[idx] / den)
-                         for idx, t in readings) if den else ""
+        # Normalise raw weights to a per-sensor share (%) of the average.
+        shares = {idx: 100.0 * w / den for idx, w in weights.items()} if den else {}
+        parts = " ".join("%s=%.1f(%.0f%%)" % (idx, t, shares.get(idx, 0.0))
+                         for idx, t in readings)
         Domoticz.Debug("Sensor fusion: consensus=%.2f -> %.2f | %s"
                        % (consensus, result, parts))
-        return result
+        return result, shares
+
+    @staticmethod
+    def _fusion_desc(avg_mode, readings, weights):
+        """Human-readable breakdown of how the ambient sensors were combined."""
+        if len(readings) <= 1:
+            return " ".join("%s=%.1f" % (idx, t) for idx, t in readings)
+        if weights:
+            body = " ".join("%s=%.1f(%.0f%%)" % (idx, t, weights.get(idx, 0.0))
+                            for idx, t in readings)
+        else:
+            body = " ".join("%s=%.1f" % (idx, t) for idx, t in readings)
+        return "%s of %d: %s" % (avg_mode, len(readings), body)
+
+    def _resolve_names(self):
+        """Look up each split's fan widget name once, for readable logs.
+        Falls back to 'fan <idx>' if the device can't be read."""
+        for s in self.splits:
+            dev = _device(s["fan"])
+            name = (dev or {}).get("Name")
+            s["name"] = name.strip() if name and name.strip() else None
+
+    @staticmethod
+    def _label(s):
+        """Readable split label: widget name if known, else the fan idx."""
+        return s["name"] if s.get("name") else ("fan %s" % s["fan"])
+
+    def _log_progress(self, s, amb, target, error, level, occupied,
+                      boost, readings, weights, now):
+        """Standard-log a once-a-minute progress line while a room is still
+        working toward target, showing the fused ambient, the sensor breakdown,
+        and the convergence rate / ETA. Goes quiet once at target."""
+        at_target = error <= FAN_DEADBAND
+        if (now - s["status_ts"]) < STATUS_LOG_INTERVAL:
+            return
+        # At target and the previous line already said so: stay quiet.
+        if at_target and s["status_err"] is not None and s["status_err"] <= FAN_DEADBAND:
+            return
+
+        # Convergence since the last line (positive rate = error shrinking).
+        trend = ""
+        prev_ts, prev_err = s["status_ts"], s["status_err"]
+        if prev_err is not None and prev_ts:
+            dmin = (now - prev_ts) / 60.0
+            if 0 < dmin <= 5 * STATUS_LOG_INTERVAL / 60.0:
+                rate = (prev_err - error) / dmin
+                if rate > 0.01 and not at_target:
+                    eta = error / rate
+                    trend = ", closing %.2f°C/min, ETA ~%d min" % (rate, round(eta))
+                elif rate < -0.01:
+                    trend = ", drifting +%.2f°C/min" % (-rate)
+                else:
+                    trend = ", steady"
+
+        fusion = self._fusion_desc(self.avg_mode, readings, weights)
+        label = self._label(s)
+        if at_target:
+            Domoticz.Log("%s: at target %.1f°C (room %.1f°C, gap %.2f°C) | %s"
+                         % (label, target, amb, error, fusion))
+        else:
+            Domoticz.Log(
+                "%s: room %.1f°C -> target %.1f°C, gap %.2f°C, "
+                "fan=%d (%s)%s%s | %s"
+                % (label, amb, target, error, level,
+                   "occupied" if occupied else "ECO",
+                   " +ext-boost" if boost else "", trend, fusion))
+        s["status_ts"] = now
+        s["status_err"] = error
 
     def _occupied(self, s, now):
         sensors = s["motion"]
@@ -732,6 +816,8 @@ class BasePlugin:
         s["last_fan"] = None
         s["last_setpoint"] = None
         s["warmup_active"] = False
+        s["status_ts"] = 0.0
+        s["status_err"] = None
 
     def _ensure_units(self):
         if not self._unit_exists(UNIT_MASTER):
