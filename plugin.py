@@ -125,6 +125,15 @@ LEARN_ALPHA = 0.3           # EMA weight for new rate samples
 SLOWNESS_MIN = 0.3          # floor on warm-up aggressiveness for fast rooms
 DEFAULT_SLOWNESS = 0.6      # warm-up aggressiveness before anything is learned
 
+# --- Historical ETA -----------------------------------------------------------
+# A smoothed approach rate (deg C/min) learned across normal regulation and
+# persisted in the learning JSON, used to estimate time-to-target even when the
+# live (line-to-line) rate reads flat. Kept separate from the warm-up rate above,
+# which is measured during fan-boosted bursts and would over-estimate progress.
+ETA_ALPHA = 0.2             # EMA weight for each new live approach-rate sample
+ETA_RATE_MIN = 0.02         # deg C/min: movement below this is treated as noise
+ETA_RATE_MAX = 3.0          # deg C/min: above this is a target jump / glitch, dropped
+
 
 def _json_get(params):
     """GET /json.htm and return the parsed JSON dict, or None on failure."""
@@ -306,7 +315,7 @@ class BasePlugin:
         self.var_idx = None
         self.avg_mode = AVG_DEFAULT
         self.sensor_var = {}      # idx -> learned deviation variance
-        self.sensors_dirty = False
+        self.soft_dirty = False   # sensor weights / ETA rate changed (throttled save)
         self.last_save_ts = 0.0
 
     # -- lifecycle ------------------------------------------------------------
@@ -362,6 +371,12 @@ class BasePlugin:
                 "warmup_start_err": 0.0,
                 "warmup_start_ts": 0.0,
                 "dirty": False,       # learning changed, needs persisting
+                # historical ETA rate (eta_rate/eta_n persisted; prev_* transient):
+                "eta_rate": None,     # smoothed approach rate for ETA, deg C/min
+                "eta_n": 0,           # number of samples behind eta_rate
+                "eta_prev_ts": 0.0,   # last ETA sample timestamp
+                "eta_prev_err": None, # error at that sample
+                "eta_prev_target": None,  # target at that sample (detect jumps)
             })
         self._resolve_names()
         Domoticz.Log("Configured %d split(s): %s"
@@ -512,6 +527,7 @@ class BasePlugin:
 
             if self.learn_enabled:
                 self._update_warmup(s, error, now)
+                self._update_eta_rate(s, error, target, now)
             level = self._fan_for(s, error, boost)
             Domoticz.Debug(
                 "Fan idx %s: amb=%.1f(%d/%d %s) target=%.1f(%s) error=%.2f ext=%s "
@@ -529,8 +545,8 @@ class BasePlugin:
             return
         if any(s["dirty"] for s in self.splits):
             self._save_learning(now)               # warm-up sample: save now
-        elif self.sensors_dirty and (now - self.last_save_ts) >= LEARN_SAVE_MIN * 60:
-            self._save_learning(now)               # sensor weights: throttled
+        elif self.soft_dirty and (now - self.last_save_ts) >= LEARN_SAVE_MIN * 60:
+            self._save_learning(now)               # sensor weights + ETA rate: throttled
 
     # -- ambient sensor fusion ------------------------------------------------
     @staticmethod
@@ -585,7 +601,7 @@ class BasePlugin:
             num += w * t
             den += w
         result = num / den if den else consensus
-        self.sensors_dirty = True
+        self.soft_dirty = True
         # Normalise raw weights to a per-sensor share (%) of the average.
         shares = {idx: 100.0 * w / den for idx, w in weights.items()} if den else {}
         parts = " ".join("%s=%.1f(%.0f%%)" % (idx, t, shares.get(idx, 0.0))
@@ -631,20 +647,36 @@ class BasePlugin:
         if at_target and s["status_err"] is not None and s["status_err"] <= FAN_DEADBAND:
             return
 
-        # Convergence since the last line (positive rate = error shrinking).
-        trend = ""
+        # Live movement since the last line (positive = error shrinking).
+        live_rate = None
         prev_ts, prev_err = s["status_ts"], s["status_err"]
         if prev_err is not None and prev_ts:
             dmin = (now - prev_ts) / 60.0
             if 0 < dmin <= 5 * STATUS_LOG_INTERVAL / 60.0:
-                rate = (prev_err - error) / dmin
-                if rate > 0.01 and not at_target:
-                    eta = error / rate
-                    trend = ", closing %.2f°C/min, ETA ~%d min" % (rate, round(eta))
-                elif rate < -0.01:
-                    trend = ", drifting +%.2f°C/min" % (-rate)
-                else:
-                    trend = ", steady"
+                live_rate = (prev_err - error) / dmin
+
+        # Historical approach rate, learned across runs and persisted; gives a
+        # stable ETA even when the live rate momentarily reads flat.
+        hist_rate = s["eta_rate"] if s["eta_rate"] and s["eta_rate"] > 0 else None
+
+        trend = ""
+        if not at_target:
+            bits = []
+            if live_rate is None:
+                pass
+            elif live_rate > ETA_RATE_MIN:
+                bits.append("closing %.2f°C/min" % live_rate)
+            elif live_rate < -ETA_RATE_MIN:
+                bits.append("drifting +%.2f°C/min" % (-live_rate))
+            else:
+                bits.append("steady")
+            # ETA from the learned historical rate when known, else the live rate.
+            eta_rate = hist_rate or (live_rate if (live_rate or 0) > ETA_RATE_MIN else None)
+            if eta_rate:
+                src = "hist n=%d" % s["eta_n"] if hist_rate else "live"
+                bits.append("ETA ~%d min (%s)" % (round(error / eta_rate), src))
+            if bits:
+                trend = ", " + ", ".join(bits)
 
         fusion = self._fusion_desc(self.avg_mode, readings, weights)
         label = self._label(s)
@@ -744,6 +776,33 @@ class BasePlugin:
         Domoticz.Log("Learned warm-up rate for fan idx %s: %.2f C/min (n=%d)"
                      % (s["fan"], s["rate"], s["n"]))
 
+    def _update_eta_rate(self, s, error, target, now):
+        """Learn a smoothed approach rate (deg C/min) from ordinary regulation, for
+        the historical ETA. Each cycle that continuously closed the gap toward an
+        unchanged target feeds an EMA; jumps, drift and the near-target tail are
+        dropped so the estimate reflects real convergence. Persisted (throttled)."""
+        prev_ts, prev_err, prev_target = (
+            s["eta_prev_ts"], s["eta_prev_err"], s["eta_prev_target"])
+        s["eta_prev_ts"], s["eta_prev_err"], s["eta_prev_target"] = now, error, target
+        if not prev_ts or prev_err is None:
+            return
+        if prev_target != target:
+            return                              # target moved: not real convergence
+        dmin = (now - prev_ts) / 60.0
+        if dmin <= 0 or dmin > 5.0:
+            return                              # a gap (unit off/stale): not continuous
+        if error <= FAN_DEADBAND:
+            return                              # the near-target tail isn't representative
+        rate = (prev_err - error) / dmin
+        if rate < ETA_RATE_MIN or rate > ETA_RATE_MAX:
+            return                              # noise, drift, or a glitch/jump
+        if s["eta_rate"]:
+            s["eta_rate"] = (1 - ETA_ALPHA) * s["eta_rate"] + ETA_ALPHA * rate
+        else:
+            s["eta_rate"] = rate
+        s["eta_n"] += 1
+        self.soft_dirty = True
+
     # -- learning persistence (Domoticz user variable) ------------------------
     def _find_var(self):
         """Return (idx, value) of our user variable, or (None, None)."""
@@ -768,6 +827,9 @@ class BasePlugin:
             if rec.get("rate"):
                 s["rate"] = float(rec["rate"])
                 s["n"] = int(rec.get("n", 1))
+            if rec.get("eta_rate"):
+                s["eta_rate"] = float(rec["eta_rate"])
+                s["eta_n"] = int(rec.get("eta_n", 1))
             for idx, var in (rec.get("sensors") or {}).items():
                 try:
                     self.sensor_var[idx] = float(var)
@@ -782,6 +844,9 @@ class BasePlugin:
             if s["rate"]:
                 rec["rate"] = round(s["rate"], 3)
                 rec["n"] = s["n"]
+            if s["eta_rate"]:
+                rec["eta_rate"] = round(s["eta_rate"], 3)
+                rec["eta_n"] = s["eta_n"]
             sensors = {idx: round(self.sensor_var[idx], 4)
                        for idx in s["ambient"] if idx in self.sensor_var}
             if sensors:
@@ -789,7 +854,7 @@ class BasePlugin:
             if rec:
                 payload[str(i)] = rec
         self.last_save_ts = now
-        self.sensors_dirty = False
+        self.soft_dirty = False
         value = json.dumps(payload)
         action = "update" if self.var_idx else "add"
         Domoticz.Log("Saving learning to user variable '%s' (%s): %s"
@@ -818,6 +883,9 @@ class BasePlugin:
         s["warmup_active"] = False
         s["status_ts"] = 0.0
         s["status_err"] = None
+        s["eta_prev_ts"] = 0.0
+        s["eta_prev_err"] = None
+        s["eta_prev_target"] = None
 
     def _ensure_units(self):
         if not self._unit_exists(UNIT_MASTER):

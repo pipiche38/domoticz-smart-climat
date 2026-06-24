@@ -115,8 +115,13 @@ value (an EMA) in a Domoticz **user variable** named `DomoticzACPilot_<HardwareI
 same blob also holds the per-sensor reliability weights when `avg` is `weighted`, e.g.
 
 ```json
-{"0": {"rate": 0.42, "n": 5, "sensors": {"424": 0.002, "1173": 1.4}}, "1": {...}}
+{"0": {"rate": 0.42, "n": 5, "eta_rate": 0.18, "eta_n": 40, "sensors": {"424": 0.002, "1173": 1.4}}, "1": {...}}
 ```
+
+`rate` is the warm-up rate (used to pre-empt the fan); `eta_rate` is a separate,
+continuously-learned approach rate used only for the **ETA** in the progress log
+(see below). They are kept apart because the warm-up rate is measured during
+fan-boosted bursts and would over-estimate progress in steady regulation.
 
 The variable is read back on startup, so the plugin is tuned from the first heartbeat:
 
@@ -139,7 +144,7 @@ target**, the plugin writes a concise line to the **standard Domoticz log** (no 
 needed) at most once a minute per split, so you can watch convergence at a glance:
 
 ```
-Salon Clim — Vitesse: room 23.8°C -> target 22.0°C, gap 1.80°C, fan=40 (occupied) +ext-boost, closing 0.30°C/min, ETA ~6 min | median of 2: 424=23.8 1173=23.9
+Salon Clim — Vitesse: room 23.8°C -> target 22.0°C, gap 1.80°C, fan=40 (occupied) +ext-boost, closing 0.30°C/min, ETA ~10 min (hist n=42) | median of 2: 424=23.8 1173=23.9
 ```
 
 Each line shows:
@@ -148,8 +153,13 @@ Each line shows:
   if the device can't be read), so rooms are named rather than numbered.
 - **room → target / gap** — the fused ambient, the active target, and the remaining error.
 - **fan / occupied|ECO / +ext-boost** — the fan level chosen and the regulation context.
-- **closing …°C/min, ETA** — the convergence rate measured since the previous line and a
-  rough time-to-target (or `drifting` / `steady` when the gap is not shrinking).
+- **closing …°C/min** — the live convergence rate measured since the previous line (or
+  `drifting` / `steady` when the gap is not shrinking minute-to-minute).
+- **ETA ~N min** — time-to-target. It prefers the **historical** approach rate
+  (`eta_rate`, learned across runs and persisted in the learning JSON, shown as
+  `hist n=…`), so an ETA still appears even when the live rate reads `steady`; it falls
+  back to the live rate (`live`) until enough history exists. Persisting the rate means
+  the ETA is meaningful from the first heartbeat after a restart.
 - **fusion breakdown** — how the ambient sensors were combined (`median`/`mean`/`weighted`,
   each sensor's reading, and its share `%` in `weighted` mode).
 

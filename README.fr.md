@@ -119,8 +119,13 @@ valeur (une EMA) dans une **variable utilisateur** Domoticz nommée
 quand `avg` vaut `weighted`, p. ex. :
 
 ```json
-{"0": {"rate": 0.42, "n": 5, "sensors": {"424": 0.002, "1173": 1.4}}, "1": {...}}
+{"0": {"rate": 0.42, "n": 5, "eta_rate": 0.18, "eta_n": 40, "sensors": {"424": 0.002, "1173": 1.4}}, "1": {...}}
 ```
+
+`rate` est le taux de montée en régime (pré-positionne la ventilation) ; `eta_rate` est un
+taux d'approche distinct, appris en continu et utilisé uniquement pour l'**ETA** du journal
+de progression (voir ci-dessous). Ils sont séparés car le taux de montée est mesuré pendant
+des bouffées de ventilation forcée et surestimerait la progression en régime établi.
 
 La variable est relue au démarrage, donc le plugin est calibré dès le premier battement :
 
@@ -146,7 +151,7 @@ besoin du mode Debug), au plus une fois par minute et par split, pour suivre la 
 d'un coup d'œil :
 
 ```
-Salon Clim — Vitesse : pièce 23,8°C -> cible 22,0°C, écart 1,80°C, ventilo=40 (occupé) +boost-ext, réduit 0,30°C/min, ETA ~6 min | median sur 2 : 424=23.8 1173=23.9
+Salon Clim — Vitesse : pièce 23,8°C -> cible 22,0°C, écart 1,80°C, ventilo=40 (occupé) +boost-ext, réduit 0,30°C/min, ETA ~10 min (hist n=42) | median sur 2 : 424=23.8 1173=23.9
 ```
 
 Chaque ligne indique :
@@ -155,8 +160,13 @@ Chaque ligne indique :
   si l'appareil est illisible), pour nommer les pièces au lieu de les numéroter.
 - **pièce → cible / écart** — l'ambiante fusionnée, la cible active et l'erreur restante.
 - **ventilo / occupé|ECO / +boost-ext** — le niveau de ventilation choisi et le contexte.
-- **réduit …°C/min, ETA** — la vitesse de convergence mesurée depuis la ligne précédente et
-  une estimation du temps jusqu'à la cible (ou `dérive` / `stable` si l'écart ne se réduit pas).
+- **réduit …°C/min** — la vitesse de convergence en direct mesurée depuis la ligne précédente
+  (ou `dérive` / `stable` si l'écart ne se réduit pas d'une minute à l'autre).
+- **ETA ~N min** — temps jusqu'à la cible. Privilégie le taux d'approche **historique**
+  (`eta_rate`, appris au fil des cycles et persisté dans le JSON d'apprentissage, affiché
+  `hist n=…`), donc une ETA s'affiche même quand le taux en direct est `stable` ; repli sur
+  le taux en direct (`live`) tant que l'historique est insuffisant. La persistance rend l'ETA
+  pertinente dès le premier battement après un redémarrage.
 - **détail de la fusion** — comment les capteurs ambiants ont été combinés
   (`median`/`mean`/`weighted`, la valeur de chaque capteur, et sa part `%` en mode `weighted`).
 
